@@ -1,0 +1,1067 @@
+{
+  "name": "Customer Support Ticket Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        0
+      ],
+      "id": "19c36d9a-eb50-48d1-9e33-adb956c7a0c4",
+      "name": "Telegram Trigger",
+      "webhookId": "e8c64953-7378-4197-ade2-d6fc300e47f7",
+      "credentials": {
+        "telegramApi": {
+          "id": "NPNsAHX3UIpW54Za",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const msg = item.json.message || item.json.edited_message || {};\n  const chatId = msg.chat?.id ?? null;\n  const userId = msg.from?.id ?? 'unknown';\n  const username = msg.from?.username ? `@${msg.from.username}` : 'no_username';\n  const fullName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'Unknown User';\n  const rawText = typeof msg.text === 'string' ? msg.text.trim() : '';\n  const timestamp = msg.date\n    ? new Date(msg.date * 1000).toISOString()\n    : new Date().toISOString();\n\n  const isValid = Boolean(chatId && rawText.length > 0);\n\n  results.push({\n    json: {\n      chat_id: chatId,\n      user_id: String(userId),\n      username,\n      full_name: fullName,\n      text: rawText,\n      timestamp,\n      is_valid: isValid,\n      error_reason: isValid ? '' : 'Empty or non-text message (photo/sticker)'\n    }\n  });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "4a5e0a7e-9dfb-48cf-b58d-34fca8944caa",
+      "name": "Extract & Validate Input"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "89b47b5d-2001-49c9-b87b-1ee5b1ac3808",
+              "leftValue": "={{ $json.is_valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        448,
+        0
+      ],
+      "id": "1af70b32-e0ac-4c6b-b6fb-2934d957c366",
+      "name": "Is Valid Message?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gemma4:e4b\",\n  \"stream\": false,\n  \"think\": false,\n  \"options\": {\n    \"temperature\": 0.1\n  },\n  \"format\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"category\": {\n        \"type\": \"string\",\n        \"enum\": [\"billing\", \"technical\", \"weather\", \"general\", \"unknown\"]\n      }\n    },\n    \"required\": [\"category\"]\n  },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a strict customer support intent classifier. Classify the user message into exactly ONE category from: billing, technical, weather, general, unknown. Rules: 'billing' = invoices, refunds, payments, subscriptions, pricing; 'technical' = bugs, errors, crashes, login or API issues; 'weather' = asking about current weather, forecast, or temperature; 'general' = greetings, /start, business hours, company info, general questions; 'unknown' = gibberish, nonsense, or unclassifiable text. Respond ONLY with valid JSON matching {\\\"category\\\": \\\"<label>\\\"}.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.text) }}\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        672,
+        -96
+      ],
+      "id": "1a56192b-bf2f-4ea5-bc61-fd1ec7de240b",
+      "name": "Classify Intent - Gemma 4",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const allowedCategories = ['billing', 'technical', 'weather', 'general'];\nconst inputMeta = $('Extract & Validate Input').item.json;\nconst rawContent = $input.item.json?.message?.content ?? '';\n\nlet parsedCategory = 'unknown';\nlet parseError = '';\n\ntry {\n  // Strip any Gemma 4 thought tags or markdown fences if ever emitted\n  const cleaned = rawContent\n    .replace(/<\\|channel>thought[\\s\\S]*?<channel\\|>/g, '')\n    .replace(/```json\\s*/gi, '')\n    .replace(/```/g, '')\n    .trim();\n\n  const parsed = JSON.parse(cleaned);\n  const candidate = String(parsed.category || '').toLowerCase().trim();\n\n  if (allowedCategories.includes(candidate)) {\n    parsedCategory = candidate;\n  } else {\n    parseError = `Disallowed or unknown category: ${candidate}`;\n  }\n} catch (err) {\n  parseError = `Malformed JSON from LLM: ${err.message}`;\n}\n\nreturn [\n  {\n    json: {\n      ...inputMeta,\n      category: parsedCategory,\n      raw_ai_output: rawContent,\n      parse_error: parseError\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -192
+      ],
+      "id": "f3d965b0-17ac-4e98-b47f-234da69b915d",
+      "name": "Parse & Validate AI JSON"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 4
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "billing",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "8d8f2848-dbd0-4809-9c2a-d1f96146eea7"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "billing"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 4
+                },
+                "conditions": [
+                  {
+                    "id": "18c9b4ad-0d27-493b-b1d2-76964bd69837",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "technical",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "technical"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 4
+                },
+                "conditions": [
+                  {
+                    "id": "c5abb723-69b4-4b31-9227-947b9fa11d00",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "weather",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "weather"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 4
+                },
+                "conditions": [
+                  {
+                    "id": "4ae37b89-ecc6-44db-b1bb-1ab93aac4007",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "general",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "general"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.5,
+      "position": [
+        1120,
+        -192
+      ],
+      "id": "a827d4f9-8207-49b6-a89b-c5c2a3e996b2",
+      "name": "Route by Category"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8",
+          "mode": "list",
+          "cachedResultName": "Support_Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $('Extract & Validate Input').item.json.timestamp }}",
+            "user_id": "={{ $('Extract & Validate Input').item.json.user_id }}",
+            "username": "={{ $('Extract & Validate Input').item.json.username }}",
+            "full_name": "={{ $('Extract & Validate Input').item.json.full_name }}",
+            "category": "=billing",
+            "api_result": "N/A",
+            "original_message": "={{ $('Extract & Validate Input').item.json.text }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "username",
+              "displayName": "username",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "api_result",
+              "displayName": "api_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1552,
+        -432
+      ],
+      "id": "7c62f852-2f2d-4955-8b50-fb66fecd41d3",
+      "name": "Log Billing Ticket",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "lvA4y9jWfj8uSTlH",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract & Validate Input').item.json.chat_id }}",
+        "text": "=💳 Billing Support Ticket Logged  Hi {{ $('Extract & Validate Input').item.json.full_name }}, we have routed your request to our Billing Department. A specialist will review your invoice/payment inquiry shortly.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1792,
+        -432
+      ],
+      "id": "40879383-6856-42be-ba72-6bb92af072d1",
+      "name": "Reply Billing",
+      "webhookId": "780890b3-b1a8-451b-ab8e-a4b513cf4ee2",
+      "credentials": {
+        "telegramApi": {
+          "id": "NPNsAHX3UIpW54Za",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8",
+          "mode": "list",
+          "cachedResultName": "Support_Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $('Extract & Validate Input').item.json.timestamp }}",
+            "user_id": "={{ $('Extract & Validate Input').item.json.user_id }}",
+            "username": "={{ $('Extract & Validate Input').item.json.username }}",
+            "full_name": "={{ $('Extract & Validate Input').item.json.full_name }}",
+            "category": "technical",
+            "original_message": "={{ $('Extract & Validate Input').item.json.text }}",
+            "api_result": "N/A"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "username",
+              "displayName": "username",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "api_result",
+              "displayName": "api_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1552,
+        -240
+      ],
+      "id": "04217094-7e39-4d3a-9be6-a046021d4613",
+      "name": "Log Technical Ticket",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "lvA4y9jWfj8uSTlH",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract & Validate Input').item.json.chat_id}}",
+        "text": "=🛠️ Technical Support Ticket Logged  Hi {{ $('Extract & Validate Input').item.json.full_name }}, our Engineering Support team has received your issue report and is investigating it now.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1808,
+        -240
+      ],
+      "id": "9fd96d42-b16e-453d-820b-b7a27be9c2e9",
+      "name": "Reply Technical",
+      "webhookId": "7214ae64-9266-4b9a-8b16-389a79ca2ce3",
+      "credentials": {
+        "telegramApi": {
+          "id": "NPNsAHX3UIpW54Za",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.open-meteo.com/v1/forecast?latitude=40.4093&longitude=49.8671&current_weather=true",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1552,
+        -48
+      ],
+      "id": "3310162f-4139-4bed-bf82-071896c3c01f",
+      "name": "Fetch Live Weather",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8",
+          "mode": "list",
+          "cachedResultName": "Support_Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $('Extract & Validate Input').item.json.timestamp }}",
+            "user_id": "={{ $('Extract & Validate Input').item.json.user_id }}",
+            "username": "={{ $('Extract & Validate Input').item.json.username }}",
+            "full_name": "={{ $('Extract & Validate Input').item.json.full_name }}",
+            "category": "weather",
+            "original_message": "={{ $('Extract & Validate Input').item.json.text }}",
+            "api_result": "=Temp: {{ $('Fetch Live Weather').item.json.current_weather.temperature }}°C, Wind: {{ $('Fetch Live Weather').item.json.current_weather.windspeed }} km/h"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "username",
+              "displayName": "username",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "api_result",
+              "displayName": "api_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1824,
+        -64
+      ],
+      "id": "46255c88-7652-4bc6-9765-0783b8e05ecb",
+      "name": "Log Weather Ticket",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "lvA4y9jWfj8uSTlH",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract & Validate Input').item.json.chat_id }}",
+        "text": "=🌤️ Live Weather Update (Baku)  • Temperature: {{ $('Fetch Live Weather').item.json.current_weather.temperature }}°C • Wind Speed: {{ $('Fetch Live Weather').item.json.current_weather.windspeed }} km/h • Observation Time: {{ $('Fetch Live Weather').item.json.current_weather.time }} UTC",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2048,
+        -64
+      ],
+      "id": "eb21664e-ae33-47df-a2e2-dc6eb370cfdb",
+      "name": "Reply Weather",
+      "webhookId": "9570a7c5-ecee-4b29-be3d-ccc1e55fea19",
+      "credentials": {
+        "telegramApi": {
+          "id": "NPNsAHX3UIpW54Za",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8",
+          "mode": "list",
+          "cachedResultName": "Support_Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Tickets",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $('Extract & Validate Input').item.json.timestamp }}",
+            "user_id": "={{ $('Extract & Validate Input').item.json.user_id }}",
+            "username": "={{ $('Extract & Validate Input').item.json.username }}",
+            "full_name": "={{ $('Extract & Validate Input').item.json.full_name }}",
+            "category": "general",
+            "original_message": "={{ $('Extract & Validate Input').item.json.text }}",
+            "api_result": "N/A"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "username",
+              "displayName": "username",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "api_result",
+              "displayName": "api_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1632,
+        192
+      ],
+      "id": "31d2560c-1426-4274-ac9b-40b39cdfe143",
+      "name": "Log General Ticket",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "lvA4y9jWfj8uSTlH",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract & Validate Input').item.json.chat_id }}",
+        "text": "=💬 General Support  Hi {{ $('Extract & Validate Input').item.json.full_name }}, thanks for reaching out! Our support hours are Monday–Friday, 09:00–18:00. We have logged your message and will follow up soon.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1888,
+        192
+      ],
+      "id": "e70c4e54-91a2-4b76-857d-00888cf95232",
+      "name": "Reply General",
+      "webhookId": "0346a7b9-2304-4b5c-8e03-9b6e8d474aef",
+      "credentials": {
+        "telegramApi": {
+          "id": "NPNsAHX3UIpW54Za",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract & Validate Input').item.json.chat_id }}",
+        "text": "=⚠️ Sorry, I couldn't automatically process or classify your message right now.  Please send a clear text message describing what you need—for example:\n• \"I have a question about my invoice\" (Billing)\n• \"The app crashes when I log in\" (Technical)\n• \"What is the current weather?\" (Live Weather)",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1312,
+        208
+      ],
+      "id": "1b45edb5-a122-423d-b985-dc1504856ce0",
+      "name": "Reply Graceful Fallback",
+      "webhookId": "33217dd7-7c67-4b26-a872-ba461578e0f1",
+      "credentials": {
+        "telegramApi": {
+          "id": "NPNsAHX3UIpW54Za",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "1. Telegram Intake & Input Guardrails\nReceives live Telegram updates via ngrok HTTPS webhook. Extracts chat_id, user_id, full_name, and text. Non-text messages (stickers/photos) or empty inputs are routed via false to the Graceful Fallback reply.",
+        "height": 208,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        256,
+        -240
+      ],
+      "typeVersion": 1,
+      "id": "415e9d9d-1f1a-44fd-9bd6-c1c2d476ab56",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "2.Local AI Intent Classification (Ollama + Gemma 4)\nCalls local gemma4:e4b via [http://host.docker.internal:11434/api/chat](http://host.docker.internal:11434/api/chat) with stream: false, think: false, and strict JSON Schema (billing | technical | weather | general | unknown). Includes a 30s timeout and routes LLM/network failures to the Error handler.",
+        "height": 320,
+        "width": 208
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        640,
+        -448
+      ],
+      "typeVersion": 1,
+      "id": "e51cc19c-6e6a-4e29-b11d-c6c2f3fd6244",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "3.Multi-Branch Routing & Live External API\nSwitch node routes strictly on the AI-assigned category field. Each valid branch logs ticket metadata to Google Sheets (Support_Tickets -> Tickets) and sends a tailored Telegram reply. The weather branch queries the live Open-Meteo REST API before replying.",
+        "height": 240,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1072,
+        -464
+      ],
+      "typeVersion": 1,
+      "id": "863dcb28-9792-4b10-8f51-1ace816b4340",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "4.Error & Edge-Case Handling\nCatches empty/non-text inputs, unrecognized/malformed AI output, Ollama service downtime, and external API errors—always replying gracefully so the user is never left hanging.",
+        "height": 192,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1008,
+        304
+      ],
+      "typeVersion": 1,
+      "id": "6d52bb7f-bd06-4a77-9402-5bee68648cb0",
+      "name": "Sticky Note3"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract & Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Valid Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid Message?": {
+      "main": [
+        [
+          {
+            "node": "Classify Intent - Gemma 4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Graceful Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Intent - Gemma 4": {
+      "main": [
+        [
+          {
+            "node": "Parse & Validate AI JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Graceful Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Validate AI JSON": {
+      "main": [
+        [
+          {
+            "node": "Route by Category",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Category": {
+      "main": [
+        [
+          {
+            "node": "Log Billing Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Technical Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Live Weather",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log General Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Graceful Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Billing Ticket": {
+      "main": [
+        [
+          {
+            "node": "Reply Billing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Technical Ticket": {
+      "main": [
+        [
+          {
+            "node": "Reply Technical",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Live Weather": {
+      "main": [
+        [
+          {
+            "node": "Log Weather Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Graceful Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Weather Ticket": {
+      "main": [
+        [
+          {
+            "node": "Reply Weather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log General Ticket": {
+      "main": [
+        [
+          {
+            "node": "Reply General",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply Graceful Fallback": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "0f849ee7-3376-4e53-929b-9a15a7625559",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3e801e05211def857fa842200800ba187a1bc16f7ea037883480e3cd5e461bbf"
+  },
+  "nodeGroups": [],
+  "id": "9V2H7PJtAjhs9I6q",
+  "tags": []
+}

@@ -4,6 +4,12 @@ An AI-driven customer support automation built manually in **n8n** that receives
 
 ---
 
+
+## Links & Storage Details
+
+- **Telegram Bot:** [@sheffield1_bot](https://t.me/sheffield1_bot) *(Note: Hosted locally via Docker, Ollama, and ngrok—active when the local runtime is running)*
+- **Logging Destination:** Google Sheets (https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit?usp=sharing)                                           
+
 ## Architecture & Workflow Flow
 
 ```text
@@ -19,10 +25,3 @@ Telegram Trigger
                                            ├─► weather   ──► Open-Meteo API ──► Google Sheets ──► Reply     │
                                            ├─► general   ──► Google Sheets ──► Telegram Reply               │
                                            └─► Fallback  ───────────────────────────────────────────────────┴─► Reply Graceful Fallback (Telegram)
-
-
-
-## Links & Storage Details
-
-- **Telegram Bot:** [@sheffield1_bot](https://t.me/sheffield1_bot) *(Note: Hosted locally via Docker, Ollama, and ngrok—active when the local runtime is running)*
-- **Logging Destination:** Google Sheets (https://docs.google.com/spreadsheets/d/1hQ7hv45evuEfrhs-2CdpHfQyFc5HHQeR8kbZpDde7j8/edit?usp=sharing)                                           
